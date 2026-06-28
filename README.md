@@ -6,9 +6,7 @@ An AI agent that lives on a $5 microcontroller and controls real hardware.
 
 **[Flash it to your ESP32 from the browser](https://wireclaw.io/flash.html)** - no tools to install, configure from your phone. The web flasher auto-detects your chip.
 
-Tell it what you want in plain language - over Telegram, serial, or NATS - and it wires up GPIO pins, reads sensors, switches relays, and sets up automation rules that keep running without the AI. It remembers your preferences across reboots, knows what time it is, can talk to other WireClaw devices on the network, and bridges to any serial device - Arduinos, GPS modules, CO2 sensors, RFID readers - over UART.
-
-Tell it what you want in plain language - over Telegram, serial, or NATS - and it wires up GPIO pins, reads sensors, switches relays, and sets up automation rules that keep running without the AI. It remembers your preferences across reboots, knows what time it is, can talk to other WireClaw devices on the network, and bridges to any serial device - Arduinos, GPS modules, CO2 sensors, RFID readers - over UART.
+Tell it what you want in plain language - over Telegram, Discord, serial, or NATS - and it wires up GPIO pins, reads sensors, switches relays, and sets up automation rules that keep running without the AI. It remembers your preferences across reboots, knows what time it is, can talk to other WireClaw devices on the network, and bridges to any serial device - Arduinos, GPS modules, CO2 sensors, RFID readers - over UART.
 
 ```
 You:  "When the chip temperature goes above 28, set the LED orange.
@@ -54,10 +52,15 @@ It can also text you via Telegram or Discord:
 
 ```
 You:  "Send me a Discord message when chip temperature goes above 40."
+
+WireClaw: "I've created a new rule to send a Discord message when the temperature exceeds 40°C.
+           You will receive a warning message, and another notification when the temperature
+           returns to normal. Let me know if you need anything else!"
 ```
 
-And natively supports the **Waveshare ESP32-S3 TOUCH-AMOLED 1.75** board with full LVGL UI, touch, IMU, and PMU support out of the box!
+The device natively connects to the Discord Gateway via WebSockets, allowing instant real-time AI responses directly from your server channels without long polling delays.
 
+It also supports the **Waveshare ESP32-S3 TOUCH-AMOLED 1.75** board with full LVGL UI, touch, IMU, and PMU support out of the box!
 
 ```
 You:  "Send me a Telegram message when chip temperature goes above 40."
@@ -313,11 +316,13 @@ Edit `data/config.json`:
   "telegram_token": "",
   "telegram_chat_id": "",
   "telegram_cooldown": "60",
+  "discord_bot_token": "",
+  "discord_allowed_channel_id": "",
   "timezone": "CET-1CEST,M3.5.0,M10.5.0/3"
 }
 ```
 
-Leave `telegram_token` empty to disable Telegram. Leave `nats_host` empty to disable NATS. Leave `api_base_url` empty to use OpenRouter (default).
+Leave `telegram_token` or `discord_bot_token` empty to disable them. Leave `nats_host` empty to disable NATS. Leave `api_base_url` empty to use OpenRouter (default).
 
 For Telegram: create a bot via [@BotFather](https://t.me/BotFather), get your chat ID from [@userinfobot](https://t.me/userinfobot).
 
@@ -381,11 +386,11 @@ Type a message and press Enter. Or open Telegram and text your bot.
 ## Resource Usage
 
 ```
-RAM:   59.7% (196KB of 320KB)
-Flash: 51.4% (1.3MB of 2.5MB)
+RAM:   29.6% (96KB of 320KB)
+Flash: 23.1% (1.5MB of 6.5MB)
 ```
 
-Static allocations: device registry (768B), rule engine (6.2KB), LLM request buffer (20KB), conversation history, persistent memory (512B), TLS stack, WebServer + mDNS (~4.5KB RAM). Setup portal and web config HTML are stored in flash (PROGMEM), not RAM.
+Static allocations: device registry, rule engine, and OS stack. The massive LLM context buffer (20KB), conversation history, persistent memory, and temporary JSON strings have been heavily optimized to dynamically allocate in **PSRAM** using `ps_malloc()`. This highly aggressive memory migration frees up an enormous amount of contiguous internal DMA-capable SRAM (dropping usage from ~100% to under 30%), allowing `mbedtls`'s hardware cryptographic BIGNUM accelerators to perform SSL TLS handshakes seamlessly—even while the Discord WebSocket and Telegram clients are concurrently active in the background! Setup portal and web config HTML are stored in flash (PROGMEM), not RAM.
 
 ## License
 
