@@ -18,6 +18,10 @@
 #endif
 
 #include <esp_task_wdt.h>
+
+// Forward declarations
+static bool handleCommand(const char *cmd, char *buf, int buf_len);
+
 #if !defined(CONFIG_IDF_TARGET_ESP32)
 #include "driver/temperature_sensor.h"
 #endif
@@ -351,10 +355,10 @@ static void historySave() {
     if (i > 0)
       f.print(",");
     f.print("{\"u\":\"");
-    jsonEscape(escaped, sizeof(escaped), history[i].user);
+    jsonEscape(escaped, (LLM_MAX_RESPONSE_LEN + 128), history[i].user);
     f.print(escaped);
     f.print("\",\"a\":\"");
-    jsonEscape(escaped, sizeof(escaped), history[i].assistant);
+    jsonEscape(escaped, (LLM_MAX_RESPONSE_LEN + 128), history[i].assistant);
     f.print(escaped);
     f.print("\"}");
   }
@@ -608,8 +612,35 @@ const char *chatWithLLM(const char *userMessage) {
 
       Serial.printf("  -> %s(%s)\n", tc->name, tc->arguments);
 
-      toolExecute(tc->name, tc->arguments, toolResultBufs[t],
-                  TOOL_RESULT_MAX_LEN);
+      
+      if (strcmp(tc->name, "run_cli") == 0) {
+          char cli_cmd[256] = {0};
+          // Simple JSON string extraction
+          const char *key = "\"command\":";
+          const char *p = strstr(tc->arguments, key);
+          if (p) {
+              p += strlen(key);
+              while (*p == ' ') p++;
+              if (*p == '"') {
+                  p++;
+                  int len = 0;
+                  while (p[len] && p[len] != '"' && len < (int)sizeof(cli_cmd) - 1) len++;
+                  strncpy(cli_cmd, p, len);
+                  cli_cmd[len] = '\0';
+              }
+          }
+          if (!handleCommand(cli_cmd, toolResultBufs[t], TOOL_RESULT_MAX_LEN)) {
+              snprintf(toolResultBufs[t], TOOL_RESULT_MAX_LEN, "Unknown CLI command: %s", cli_cmd);
+          }
+      } else if (strcmp(tc->name, "file_read") == 0) {
+          // Handled directly via toolExecute
+          toolExecute(tc->name, tc->arguments, toolResultBufs[t], TOOL_RESULT_MAX_LEN);
+      } else if (strcmp(tc->name, "file_write") == 0) {
+          toolExecute(tc->name, tc->arguments, toolResultBufs[t], TOOL_RESULT_MAX_LEN);
+      } else {
+          snprintf(toolResultBufs[t], TOOL_RESULT_MAX_LEN, "Unknown tool: %s", tc->name);
+      }
+
 
       Serial.printf("     = %s\n", toolResultBufs[t]);
 
@@ -740,13 +771,118 @@ extern bool g_telegram_enabled;
 static char *cmdResponseBuf = nullptr;
 
 /* Forward declarations */
+static bool handleCommand(const char *cmd, char *buf, int buf_len);
 
 /**
  * Execute a device command, writing compact result to buf.
  * cmd is the command name WITHOUT leading "/" (e.g. "status", "clear").
  * Returns true if the command was recognized and handled.
  */
+
+static void parseCliToJson(const char *args, char *json_buf, int json_len) {
+    int w = snprintf(json_buf, json_len, "{");
+    bool first = true;
+    const char *p = args;
+    while (*p) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        const char *key_start = p;
+        while (*p && *p != '=' && *p != ' ') p++;
+        if (*p != '=') { 
+            // no =, skip to next space
+            while (*p && *p != ' ') p++;
+            continue;
+        }
+        int key_len = p - key_start;
+        p++; // skip '='
+        
+        const char *val_start = p;
+        int val_len = 0;
+        if (*p == '\'' || *p == '"') {
+            char quote = *p;
+            p++;
+            val_start = p;
+            while (*p && *p != quote) p++;
+            val_len = p - val_start;
+            if (*p == quote) p++;
+        } else {
+            while (*p && *p != ' ') p++;
+            val_len = p - val_start;
+        }
+        
+        if (!first) {
+            w += snprintf(json_buf + w, json_len - w, ",");
+        }
+        first = false;
+        
+        bool is_num = true;
+        for (int i = 0; i < val_len; i++) {
+            if (!isdigit(val_start[i]) && val_start[i] != '.' && val_start[i] != '-') {
+                is_num = false; break;
+            }
+        }
+        if (val_len == 0 || (val_len == 1 && val_start[0] == '-')) is_num = false;
+        
+        if (is_num) {
+            w += snprintf(json_buf + w, json_len - w, "\"%.*s\":%.*s", key_len, key_start, val_len, val_start);
+        } else {
+            w += snprintf(json_buf + w, json_len - w, "\"%.*s\":\"%.*s\"", key_len, key_start, val_len, val_start);
+        }
+    }
+    snprintf(json_buf + w, json_len - w, "}");
+}
+
 static bool handleCommand(const char *cmd, char *buf, int buf_len) {
+
+  // Check if it's a toolExecute command (like rule_create, device_register, led_set)
+  char cmdName[64];
+  const char *space = strchr(cmd, ' ');
+  if (space) {
+    int len = space - cmd < 63 ? space - cmd : 63;
+    strncpy(cmdName, cmd, len);
+    cmdName[len] = '\0';
+  } else {
+    strncpy(cmdName, cmd, 63);
+    cmdName[63] = '\0';
+  }
+  
+  // Try toolsExecute first
+  char jsonBuf[1024];
+  if (space) {
+      parseCliToJson(space + 1, jsonBuf, sizeof(jsonBuf));
+  } else {
+      snprintf(jsonBuf, sizeof(jsonBuf), "{}");
+  }
+  
+  if (toolExecute(cmdName, jsonBuf, buf, buf_len)) {
+      return true;
+  }
+  
+  if (strcmp(cmdName, "cat") == 0) {
+      if (!space) { snprintf(buf, buf_len, "Usage: cat [file]"); return true; }
+      const char *path = space + 1;
+      int r = readFile(path, buf, buf_len);
+      if (r <= 0) snprintf(buf, buf_len, "File not found: %s", path);
+      return true;
+  }
+  
+  if (strcmp(cmdName, "ls") == 0) {
+      File root = LittleFS.open(space ? space + 1 : "/data");
+      if (!root || !root.isDirectory()) {
+          snprintf(buf, buf_len, "Dir not found");
+          return true;
+      }
+      int w = 0;
+      File file = root.openNextFile();
+      while (file && w < buf_len - 100) {
+          w += snprintf(buf + w, buf_len - w, "%s (%u)\n", file.name(), (unsigned)file.size());
+          file = root.openNextFile();
+      }
+      if (w == 0) snprintf(buf, buf_len, "Empty");
+      return true;
+  }
+
+
   if (strcmp(cmd, "status") == 0) {
     snprintf(buf, buf_len,
              "WiFi: %s (%s)\n"
@@ -960,8 +1096,8 @@ static void onNatsCmd(nats_client_t *client, const nats_msg_t *msg,
 
   Serial.printf("\n[NATS] cmd: %s\n", cmdBuf);
 
-  if (!handleCommand(cmdBuf, cmdResponseBuf, sizeof(cmdResponseBuf))) {
-    snprintf(cmdResponseBuf, sizeof(cmdResponseBuf),
+  if (!handleCommand(cmdBuf, cmdResponseBuf, 1024)) {
+    snprintf(cmdResponseBuf, 1024,
              "Unknown command: %s (try /help)", cmdBuf);
   }
 
@@ -1042,7 +1178,7 @@ static void onNatsToolExec(nats_client_t *client, const nats_msg_t *msg,
   /* Execute tool — result into cmdResponseBuf (idle — only used by
    * handleCommand, which we never call from this callback). */
   bool found = toolExecute(toolName, toolCallJsonBuf, cmdResponseBuf,
-                           sizeof(cmdResponseBuf));
+                           1024);
 
   /* Determine success: unknown tool or "Error:" prefix */
   bool ok = found && strncmp(cmdResponseBuf, "Error:", 6) != 0;
@@ -1051,12 +1187,12 @@ static void onNatsToolExec(nats_client_t *client, const nats_msg_t *msg,
   static char *reply = nullptr; if(!reply) reply = (char*)ps_malloc(768);
   int w;
   if (ok) {
-    w = snprintf(reply, sizeof(reply), "{\"ok\":true,\"result\":\"");
+    w = snprintf(reply, 768, "{\"ok\":true,\"result\":\"");
   } else {
-    w = snprintf(reply, sizeof(reply), "{\"ok\":false,\"error\":\"");
+    w = snprintf(reply, 768, "{\"ok\":false,\"error\":\"");
   }
-  w += jsonEscape(reply + w, sizeof(reply) - w - 3, cmdResponseBuf);
-  snprintf(reply + w, sizeof(reply) - w, "\"}");
+  w += jsonEscape(reply + w, 768 - w - 3, cmdResponseBuf);
+  snprintf(reply + w, 768 - w, "\"}");
 
   Serial.printf("[NATS] tool_exec -> %s\n> ", ok ? "ok" : "error");
 
@@ -1327,6 +1463,12 @@ static const char *DISCORD_API_HOST = "discord.com";
 static const int DISCORD_API_PORT = 443;
 
 static WebSocketsClient discord_ws;
+
+extern const uint8_t rootca_crt_start[] asm("_binary_src_rootca_crt_start");
+
+// Forward declarations
+static bool handleCommand(const char *cmd, char *buf, int buf_len);
+
 static int discord_heartbeat_interval = 41250;
 static unsigned long discord_last_heartbeat = 0;
 static char discord_bot_id[32] = "";
@@ -1460,7 +1602,7 @@ bool tgSendMessage(const char *text) {
   }
   escaped[w] = '\0';
 
-  int req_len = snprintf(req, sizeof(req), "{\"chat_id\":%s,\"text\":\"%s\"}",
+  int req_len = snprintf(req, (LLM_MAX_RESPONSE_LEN + 256), "{\"chat_id\":%s,\"text\":\"%s\"}",
                          cfg_telegram_chat_id, escaped);
 
   static char resp[256];
@@ -1502,7 +1644,7 @@ static void telegramTick() {
     static char body[128];
     int body_len;
     body_len = snprintf(
-        body, sizeof(body), "{\"offset\":%d,\"limit\":1,\"timeout\":%d}",
+        body, 2048, "{\"offset\":%d,\"limit\":1,\"timeout\":%d}",
         tgLastUpdateId + 1, g_reboot_pending ? 0 : TG_LONG_POLL_S);
 
     static char httpReq[512];
@@ -1703,11 +1845,11 @@ static void telegramTick() {
       if (at)
         *at = '\0';
 
-      if (handleCommand(cmdCopy, cmdResponseBuf, sizeof(cmdResponseBuf))) {
+      if (handleCommand(cmdCopy, cmdResponseBuf, 1024)) {
         Serial.printf("[TG] cmd: /%s -> %s\n", cmdCopy, cmdResponseBuf);
         tgSendMessage(cmdResponseBuf);
       } else {
-        snprintf(cmdResponseBuf, sizeof(cmdResponseBuf),
+        snprintf(cmdResponseBuf, 1024,
                  "Unknown command: /%s (try /help)", cmdCopy);
         tgSendMessage(cmdResponseBuf);
       }
@@ -1829,7 +1971,7 @@ bool discordSendMessage(const char *text) {
   }
   escaped[w] = '\0';
 
-  int req_len = snprintf(req, sizeof(req), "{\"content\":\"%s\"}", escaped);
+  int req_len = snprintf(req, (LLM_MAX_RESPONSE_LEN + 256), "{\"content\":\"%s\"}", escaped);
   static char endpoint[128];
   snprintf(endpoint, sizeof(endpoint), "/channels/%s/messages",
            cfg_discord_channel_id);
@@ -1897,10 +2039,10 @@ static void discordWebSocketEvent(WStype_t type, uint8_t * payload, size_t lengt
                         Serial.printf("\n[Discord] Message: %s\n", content);
                         
                         if (content[0] == '/') {
-                            if (handleCommand(content + 1, cmdResponseBuf, sizeof(cmdResponseBuf))) {
+                            if (handleCommand(content + 1, cmdResponseBuf, 1024)) {
                                 discordSendMessage(cmdResponseBuf);
                             } else {
-                                snprintf(cmdResponseBuf, sizeof(cmdResponseBuf), "Unknown command: %s", content);
+                                snprintf(cmdResponseBuf, 1024, "Unknown command: %s", content);
                                 discordSendMessage(cmdResponseBuf);
                             }
                             Serial.printf("> ");
@@ -1979,7 +2121,7 @@ void handleSerialCommand(const char *input) {
   /* Shared commands — delegate to handleCommand() */
   if (input[0] == '/') {
     const char *cmd = input + 1;
-    if (handleCommand(cmd, cmdResponseBuf, sizeof(cmdResponseBuf))) {
+    if (handleCommand(cmd, cmdResponseBuf, 1024)) {
       Serial.printf("%s\n> ", cmdResponseBuf);
       return;
     }

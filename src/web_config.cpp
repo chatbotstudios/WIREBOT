@@ -126,7 +126,7 @@ static void handleGetConfig() {
     maskSensitive(cfg_wifi_pass, masked_pass, sizeof(masked_pass));
     maskSensitive(cfg_telegram_token, masked_tg, sizeof(masked_tg));
 
-    snprintf(buf, sizeof(buf),
+    snprintf(buf, 4096,
         "{"
         "\"wifi_ssid\":\"%s\","
         "\"wifi_pass\":\"%s\","
@@ -252,7 +252,7 @@ static void handlePostPrompt() {
 
 static void handleGetMemory() {
     static char buf[512];
-    int len = wcReadFile("/memory.txt", buf, sizeof(buf));
+    int len = wcReadFile("/memory.txt", buf, 2048);
     if (len <= 0) buf[0] = '\0';
     server.send(200, "text/plain", buf);
 }
@@ -284,7 +284,7 @@ static void handleGetStatus() {
     unsigned long mins = (uptime % 3600) / 60;
     unsigned long secs = uptime % 60;
 
-    snprintf(buf, sizeof(buf),
+    snprintf(buf, 4096,
         "{"
         "\"version\":\"%s\","
         "\"device_name\":\"%s\","
@@ -349,14 +349,14 @@ static void handleGetRules() {
     int w = 0;
 
     const Rule *rules = ruleGetAll();
-    w += snprintf(buf + w, sizeof(buf) - w, "[");
+    w += snprintf(buf + w, 4096 - w, "[");
 
     bool first = true;
-    for (int i = 0; i < MAX_RULES && w < (int)sizeof(buf) - 512; i++) {
+    for (int i = 0; i < MAX_RULES && w < (int)4096 - 512; i++) {
         if (!rules[i].used) continue;
         const Rule *r = &rules[i];
 
-        if (!first) w += snprintf(buf + w, sizeof(buf) - w, ",");
+        if (!first) w += snprintf(buf + w, 4096 - w, ",");
         first = false;
 
         /* Source description */
@@ -400,7 +400,7 @@ static void handleGetRules() {
         jsonEscapeBuf(e_chain, sizeof(e_chain), chain);
 
         uint32_t eval_ago = r->last_eval ? (millis() - r->last_eval) / 1000 : 0;
-        w += snprintf(buf + w, sizeof(buf) - w,
+        w += snprintf(buf + w, 4096 - w,
             "{\"id\":\"%s\",\"name\":\"%s\",\"en\":%s,"
             "\"src\":\"%s\",\"on\":\"%s\",\"off\":\"%s\","
             "\"chain\":\"%s\",\"val\":%.1f,\"fired\":%s,"
@@ -411,7 +411,7 @@ static void handleGetRules() {
             (unsigned)eval_ago, (unsigned)(r->interval_ms / 1000));
     }
 
-    w += snprintf(buf + w, sizeof(buf) - w, "]");
+    w += snprintf(buf + w, 4096 - w, "]");
     server.send(200, "application/json", buf);
 }
 
@@ -447,14 +447,14 @@ static void handleGetDevices() {
     int w = 0;
 
     Device *devs = deviceGetAll();
-    w += snprintf(buf + w, sizeof(buf) - w, "[");
+    w += snprintf(buf + w, 4096 - w, "[");
 
     bool first = true;
-    for (int i = 0; i < MAX_DEVICES && w < (int)sizeof(buf) - 256; i++) {
+    for (int i = 0; i < MAX_DEVICES && w < (int)4096 - 256; i++) {
         if (!devs[i].used) continue;
         Device *d = &devs[i];
 
-        if (!first) w += snprintf(buf + w, sizeof(buf) - w, ",");
+        if (!first) w += snprintf(buf + w, 4096 - w, ",");
         first = false;
 
         /* Read current value */
@@ -501,7 +501,7 @@ static void handleGetDevices() {
         jsonEscapeBuf(e_extra, sizeof(e_extra), extra);
         jsonEscapeBuf(e_msg, sizeof(e_msg), msg);
 
-        w += snprintf(buf + w, sizeof(buf) - w,
+        w += snprintf(buf + w, 4096 - w,
             "{\"name\":\"%s\",\"kind\":\"%s\",\"pin\":\"%s\","
             "\"value\":\"%s\",\"extra\":\"%s\",\"msg\":\"%s\",\"internal\":%s",
             e_name, deviceKindName(d->kind), pin_str,
@@ -511,20 +511,20 @@ static void handleGetDevices() {
         /* Append history array for sensors with recorded readings */
         int hcount = d->history_full ? DEV_HISTORY_LEN : d->history_idx;
         if (hcount > 0) {
-            w += snprintf(buf + w, sizeof(buf) - w, ",\"hist\":[");
+            w += snprintf(buf + w, 4096 - w, ",\"hist\":[");
             int hstart = d->history_full ? d->history_idx : 0;
             for (int h = 0; h < hcount; h++) {
                 if (h > 0) buf[w++] = ',';
                 int idx = (hstart + h) % DEV_HISTORY_LEN;
-                w += snprintf(buf + w, sizeof(buf) - w, "%.1f", d->history[idx]);
+                w += snprintf(buf + w, 4096 - w, "%.1f", d->history[idx]);
             }
-            w += snprintf(buf + w, sizeof(buf) - w, "]");
+            w += snprintf(buf + w, 4096 - w, "]");
         }
 
         buf[w++] = '}';
     }
 
-    w += snprintf(buf + w, sizeof(buf) - w, "]");
+    w += snprintf(buf + w, 4096 - w, "]");
     server.send(200, "application/json", buf);
 }
 

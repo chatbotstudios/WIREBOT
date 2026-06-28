@@ -266,8 +266,8 @@ static bool handleClient(WiFiClient &client) {
     if (isPost && contentLength > 0) {
         /* Read POST body */
         static char *body = nullptr; if(!body) body = (char*)ps_malloc(2048);
-        int toRead = contentLength < (int)sizeof(body) - 1
-                     ? contentLength : (int)sizeof(body) - 1;
+        int toRead = contentLength < (int)2048 - 1
+                     ? contentLength : (int)2048 - 1;
         int bytesRead = client.readBytes(body, toRead);
         body[bytesRead] = '\0';
 

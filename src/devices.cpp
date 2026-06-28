@@ -331,7 +331,7 @@ void parseNatsPayload(const uint8_t *data, size_t len,
 
     /* Null-terminate into a stack buffer */
     char buf[256];
-    size_t copy = len < sizeof(buf) - 1 ? len : sizeof(buf) - 1;
+    size_t copy = len < 2048 - 1 ? len : 2048 - 1;
     memcpy(buf, data, copy);
     buf[copy] = '\0';
 
@@ -439,34 +439,34 @@ void devicesSave() {
     static char *buf = nullptr; if(!buf) buf = (char*)ps_malloc(2048);
     int w = 0;
 
-    w += snprintf(buf + w, sizeof(buf) - w, "[");
+    w += snprintf(buf + w, 2048 - w, "[");
 
     bool first = true;
     for (int i = 0; i < MAX_DEVICES; i++) {
         if (!g_devices[i].used) continue;
         const Device *d = &g_devices[i];
 
-        if (!first) w += snprintf(buf + w, sizeof(buf) - w, ",");
+        if (!first) w += snprintf(buf + w, 2048 - w, ",");
         first = false;
 
-        w += snprintf(buf + w, sizeof(buf) - w,
+        w += snprintf(buf + w, 2048 - w,
             "{\"n\":\"%s\",\"k\":\"%s\",\"p\":%d,\"u\":\"%s\",\"i\":%s",
             d->name, deviceKindName(d->kind), d->pin,
             d->unit, d->inverted ? "true" : "false");
         if (d->nats_subject[0]) {
-            w += snprintf(buf + w, sizeof(buf) - w,
+            w += snprintf(buf + w, 2048 - w,
                 ",\"ns\":\"%s\"", d->nats_subject);
         }
         if (d->baud > 0) {
-            w += snprintf(buf + w, sizeof(buf) - w,
+            w += snprintf(buf + w, 2048 - w,
                 ",\"bd\":%u", (unsigned)d->baud);
         }
-        w += snprintf(buf + w, sizeof(buf) - w, "}");
+        w += snprintf(buf + w, 2048 - w, "}");
 
-        if (w >= (int)sizeof(buf) - 1) break;
+        if (w >= (int)2048 - 1) break;
     }
 
-    w += snprintf(buf + w, sizeof(buf) - w, "]");
+    w += snprintf(buf + w, 2048 - w, "]");
 
     File f = LittleFS.open("/devices.json", "w");
     if (f) {
@@ -482,7 +482,7 @@ static void devicesLoad() {
     File f = LittleFS.open("/devices.json", "r");
     if (!f) return;
 
-    int len = f.readBytes(buf, sizeof(buf) - 1);
+    int len = f.readBytes(buf, 2048 - 1);
     buf[len] = '\0';
     f.close();
 

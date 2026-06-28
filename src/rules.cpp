@@ -635,17 +635,17 @@ void rulesSave() {
     static char *buf = nullptr; if(!buf) buf = (char*)ps_malloc(4096);
     int w = 0;
 
-    w += snprintf(buf + w, sizeof(buf) - w, "[");
+    w += snprintf(buf + w, 4096 - w, "[");
 
     bool first = true;
     for (int i = 0; i < MAX_RULES; i++) {
         if (!g_rules[i].used) continue;
         const Rule *r = &g_rules[i];
 
-        if (!first) w += snprintf(buf + w, sizeof(buf) - w, ",");
+        if (!first) w += snprintf(buf + w, 4096 - w, ",");
         first = false;
 
-        w += snprintf(buf + w, sizeof(buf) - w,
+        w += snprintf(buf + w, 4096 - w,
             "{\"id\":\"%s\",\"nm\":\"%s\",\"sn\":\"%s\",\"sp\":%d,\"sa\":%s,"
             "\"co\":\"%s\",\"th\":%d,\"iv\":%u,"
             "\"oa\":\"%s\",\"oac\":\"%s\",\"op\":%d,\"ov\":%d,"
@@ -667,10 +667,10 @@ void rulesSave() {
             r->enabled ? "true" : "false",
             (unsigned)r->last_triggered);
 
-        if (w >= (int)sizeof(buf) - 1) break;
+        if (w >= (int)4096 - 1) break;
     }
 
-    w += snprintf(buf + w, sizeof(buf) - w, "]");
+    w += snprintf(buf + w, 4096 - w, "]");
 
     File f = LittleFS.open("/rules.json", "w");
     if (f) {
@@ -686,7 +686,7 @@ static void rulesLoad() {
     File f = LittleFS.open("/rules.json", "r");
     if (!f) return;
 
-    int len = f.readBytes(buf, sizeof(buf) - 1);
+    int len = f.readBytes(buf, 4096 - 1);
     buf[len] = '\0';
     f.close();
 
