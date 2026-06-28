@@ -181,7 +181,7 @@ static bool loadConfig() {
 
   /* Load config.json */
   static char json_buf[1024];
-  int len = readFile("/config.json", json_buf, sizeof(json_buf));
+  int len = readFile("/vault/config.json", json_buf, sizeof(json_buf));
   if (len > 0) {
     Serial.printf("LittleFS: loaded config.json (%d bytes)\n", len);
     jsonGetString(json_buf, "wifi_ssid", cfg_wifi_ssid, sizeof(cfg_wifi_ssid));
@@ -222,12 +222,31 @@ static bool loadConfig() {
   }
 
   /* Load system prompt */
-  len = readFile("/system_prompt.txt", cfg_system_prompt,
-                 sizeof(cfg_system_prompt));
-  if (len > 0) {
-    Serial.printf("LittleFS: loaded system_prompt.txt (%d bytes)\n", len);
-  } else {
-    Serial.printf("LittleFS: no system_prompt.txt, using default prompt\n");
+  // Load Workspace (SOUL, AGENT, MEMORY)
+  cfg_system_prompt[0] = '\0';
+  char temp_buf[2048];
+  int total_len = 0;
+  
+  auto append_file = [&](const char* path) {
+      int l = readFile(path, temp_buf, sizeof(temp_buf) - 1);
+      if (l > 0) {
+          temp_buf[l] = '\n'; // Ensure newline
+          temp_buf[l+1] = '\0';
+          if (total_len + l + 1 < (int)sizeof(cfg_system_prompt)) {
+              strcat(cfg_system_prompt, temp_buf);
+              total_len += l + 1;
+              Serial.printf("LittleFS: loaded %s (%d bytes)\n", path, l);
+          }
+      }
+  };
+  
+  append_file("/workspace/SOUL.md");
+  append_file("/workspace/AGENT.md");
+  append_file("/workspace/MEMORY.md");
+  
+  if (total_len == 0) {
+      Serial.printf("LittleFS: workspace empty, using default prompt\n");
+      // Default prompt was copied earlier
   }
 
   return true;

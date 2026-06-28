@@ -234,7 +234,7 @@ static void handlePostPrompt() {
         return;
     }
 
-    File f = LittleFS.open("/system_prompt.txt", "w");
+    File f = LittleFS.open("/workspace/SOUL.md", "w");
     if (!f) {
         server.send(500, "text/plain", "write failed");
         return;
