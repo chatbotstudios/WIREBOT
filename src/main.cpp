@@ -310,7 +310,6 @@ bool tgSendMessage(const char *text);
 
 #include <esp_task_wdt.h>
 static void agentTask(void *pvParameters) {
-    esp_task_wdt_add(NULL);
     bus_msg_t msg;
     while (1) {
         if (xQueueReceive(message_bus_queue, &msg, portMAX_DELAY) == pdTRUE) {
