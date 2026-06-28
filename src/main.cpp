@@ -2278,7 +2278,7 @@ static unsigned long lastHeartbeat = 0;
 #define HEARTBEAT_INTERVAL_MS 3000
 
 void loop() {
-  esp_task_wdt_reset(); /* Feed the watchdog */
+   /* Feed the watchdog */
 
   /* LED heartbeat - brief dim green blink when idle */
   if (!g_led_user) {

@@ -333,7 +333,7 @@ void runSetupPortal() {
     unsigned long startTime = millis();
 
     while (millis() - startTime < PORTAL_TIMEOUT_MS) {
-        esp_task_wdt_reset();
+        
         dns.processNextRequest();
 
         /* Pulsing cyan LED — triangle wave, 2s period */

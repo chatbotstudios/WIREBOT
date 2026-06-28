@@ -90,6 +90,7 @@ static bool jsonArgExists(const char *json, const char *key) {
  *============================================================================*/
 
 static const char *TOOLS_JSON = R"JSON([
+{"type":"function","function":{"name":"run_cli","description":"Run a command in the local shell. Use this for all sysadmin tasks.","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}},
 {"type":"function","function":{"name":"led_set","description":"Set RGB LED 0-255","parameters":{"type":"object","properties":{"r":{"type":"integer"},"g":{"type":"integer"},"b":{"type":"integer"}},"required":["r","g","b"]}}},
 {"type":"function","function":{"name":"gpio_write","description":"Set GPIO pin HIGH/LOW","parameters":{"type":"object","properties":{"pin":{"type":"integer"},"value":{"type":"integer"}},"required":["pin","value"]}}},
 {"type":"function","function":{"name":"gpio_read","description":"Read GPIO pin state","parameters":{"type":"object","properties":{"pin":{"type":"integer"}},"required":["pin"]}}},
@@ -895,7 +896,7 @@ static void tool_remote_chat(const char *args, char *result, int result_len) {
 
     /* Poll until complete or timeout */
     while (true) {
-        esp_task_wdt_reset();
+        
         natsClient.process();
         nats_err_t status = natsClient.requestCheck(&req);
         if (status == NATS_OK) {

@@ -751,7 +751,7 @@ int LlmClient::readResponse(char *buf, int buf_len) {
 
     unsigned long last_data = millis();
     while (total < target) {
-        esp_task_wdt_reset();
+        
         int avail = m_client->available();
         if (avail > 0) {
             int to_read = avail < (target - total) ? avail : (target - total);
@@ -830,7 +830,7 @@ bool LlmClient::chat(const LlmMessage *messages, int count,
 
     unsigned long wait_start = millis();
     while (!m_client->available()) {
-        esp_task_wdt_reset();
+        
         if (millis() - wait_start > LLM_READ_TIMEOUT_MS) {
             snprintf(m_error, sizeof(m_error), "Response timeout (%ds)",
                      LLM_READ_TIMEOUT_MS / 1000);
