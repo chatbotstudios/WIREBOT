@@ -6,6 +6,7 @@
 #include "llm_client.h"
 #include <WiFiClientSecure.h>
 #include <esp_task_wdt.h>
+#include <ArduinoJson.h>
 
 /* Default OpenRouter API endpoint */
 static const char *DEFAULT_HOST = "openrouter.ai";
@@ -322,12 +323,40 @@ int LlmClient::buildGeminiRequest(char *buf, int buf_len,
         if (w >= buf_len) return -1;
 
         if (msg->type == LLM_MSG_TOOL_CALL) {
-            // For Gemini, we must format functionCall
-            // LlmResult saves raw tool_calls JSON array. 
-            // In WireClaw, msg->tool_calls_json has OpenAI format like [{"id":"...","function":{"name":"...","arguments":"..."}}]
-            // We just need to map this to functionCall.
-            // To keep it simple, we use a basic parse loop.
-            w += snprintf(buf + w, buf_len - w, "{\"text\":\"\"}");
+            if (msg->tool_calls_json && msg->tool_calls_json[0]) {
+                JsonDocument doc;
+                DeserializationError err = deserializeJson(doc, msg->tool_calls_json);
+                if (!err && doc.is<JsonArray>()) {
+                    JsonArray arr = doc.as<JsonArray>();
+                    bool first_tc = true;
+                    for (JsonObject tc : arr) {
+                        if (!first_tc) { 
+                            w += snprintf(buf + w, buf_len - w, ","); 
+                            if (w >= buf_len) return -1;
+                        }
+                        first_tc = false;
+                        const char* name = tc["function"]["name"];
+                        const char* args_str = tc["function"]["arguments"];
+                        
+                        w += snprintf(buf + w, buf_len - w, "{\"functionCall\":{\"name\":\"%s\",\"args\":", name ? name : "");
+                        if (w >= buf_len) return -1;
+                        
+                        if (args_str && args_str[0] == '{') {
+                            w += snprintf(buf + w, buf_len - w, "%s", args_str);
+                        } else {
+                            w += snprintf(buf + w, buf_len - w, "{}");
+                        }
+                        if (w >= buf_len) return -1;
+                        
+                        w += snprintf(buf + w, buf_len - w, "}}");
+                        if (w >= buf_len) return -1;
+                    }
+                } else {
+                    w += snprintf(buf + w, buf_len - w, "{\"text\":\"\"}");
+                }
+            } else {
+                w += snprintf(buf + w, buf_len - w, "{\"text\":\"\"}");
+            }
         } else if (msg->type == LLM_MSG_TOOL_RESULT) {
             // msg->content contains the tool result string
             w += snprintf(buf + w, buf_len - w, "{\"functionResponse\":{\"name\":\"%s\",\"response\":{\"result\":\"", msg->tool_call_id ? msg->tool_call_id : "tool");
@@ -365,7 +394,7 @@ int LlmClient::buildGeminiRequest(char *buf, int buf_len,
     // Tools
     if (tools_json && tools_json[0]) {
         static char *gemini_tools = nullptr; if(!gemini_tools) gemini_tools = (char*)ps_malloc(4096);
-        convert_openai_tools_to_gemini(tools_json, gemini_tools, sizeof(gemini_tools));
+        convert_openai_tools_to_gemini(tools_json, gemini_tools, 4096);
         if (gemini_tools[0]) {
             w += snprintf(buf + w, buf_len - w, ",\"tools\":[{\"functionDeclarations\":%s}]", gemini_tools);
             if (w >= buf_len) return -1;
@@ -442,8 +471,10 @@ bool LlmClient::parseGeminiResponse(const char *body, int body_len, LlmResult *r
                     }
                     
                     result->tool_call_count = 1;
+                    char esc_args[512] = {0};
+                    json_escape(esc_args, sizeof(esc_args), tc->arguments);
                     // Mock tool_calls_json to keep LlmClient::chat happy
-                    snprintf(result->tool_calls_json, sizeof(result->tool_calls_json), "[{\"id\":\"%s\",\"function\":{\"name\":\"%s\",\"arguments\":\"%s\"}}]", tc->id, tc->name, tc->arguments);
+                    snprintf(result->tool_calls_json, sizeof(result->tool_calls_json), "[{\"id\":\"%s\",\"function\":{\"name\":\"%s\",\"arguments\":\"%s\"}}]", tc->id, tc->name, esc_args);
                 }
             }
         }
