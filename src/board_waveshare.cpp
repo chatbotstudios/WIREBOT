@@ -1,6 +1,10 @@
 #ifdef BOARD_WAVESHARE_AMOLED
 
 #include "board_waveshare.h"
+#if !defined(CONFIG_IDF_TARGET_ESP32)
+#include "driver/temperature_sensor.h"
+extern temperature_sensor_handle_t g_temp_sensor;
+#endif
 #include <Arduino.h>
 #include <Wire.h>
 #include <SPI.h>
@@ -121,15 +125,15 @@ void boardUpdateUI(const char* deviceName, bool wifiOn, const char* ipAddress) {
     uint16_t cSub = dimColor(0x7BEF, alpha, bg);
 
     int cx = CANVAS_W / 2;
-    int cy = CANVAS_H / 2 - 30;
+    int cy = CANVAS_H / 2 - 50;
     int size = 25;
     canvas->fillTriangle(cx, cy - size, cx - 6, cy, cx + 6, cy, cLogo);
     canvas->fillTriangle(cx, cy + size, cx - 6, cy, cx + 6, cy, cLogo);
     canvas->fillTriangle(cx - size, cy, cx, cy - 6, cx, cy + 6, cLogo);
     canvas->fillTriangle(cx + size, cy, cx, cy - 6, cx, cy + 6, cLogo);
 
-    drawCenteredText("WireClaw", CANVAS_W / 2, CANVAS_H / 2 + 15, 3, cText, bg);
-    drawCenteredText(deviceName, CANVAS_W / 2, CANVAS_H / 2 + 40, 1, cSub, bg);
+    drawCenteredText("WireBot", CANVAS_W / 2, CANVAS_H / 2 - 5, 3, cText, bg);
+    // drawCenteredText(deviceName, CANVAS_W / 2, CANVAS_H / 2 + 40, 1, cSub, bg);
 
     // Display WiFi and IP Address as requested
     if (wifiOn && ipAddress != nullptr && strlen(ipAddress) > 0) {
@@ -141,6 +145,21 @@ void boardUpdateUI(const char* deviceName, bool wifiOn, const char* ipAddress) {
         drawCenteredText("WiFi: OFF", CANVAS_W / 2, CANVAS_H / 2 + 55, 1, canvas->color565(255, 0, 0), bg);
         drawCenteredText("No IP", CANVAS_W / 2, CANVAS_H / 2 + 65, 1, canvas->color565(100, 100, 100), bg);
     }
+
+#if !defined(CONFIG_IDF_TARGET_ESP32)
+    float temp = 0.0;
+    if (g_temp_sensor) {
+        temperature_sensor_get_celsius(g_temp_sensor, &temp);
+    }
+    uint16_t temp_color;
+    if (temp < 30.0) temp_color = canvas->color565(0, 255, 0);
+    else if (temp <= 33.0) temp_color = canvas->color565(255, 165, 0);
+    else temp_color = canvas->color565(255, 0, 0);
+    char tempBuf[32];
+    snprintf(tempBuf, sizeof(tempBuf), "Temp: %.1fC", temp);
+    drawCenteredText(tempBuf, CANVAS_W / 2, CANVAS_H / 2 + 80, 1, temp_color, bg);
+#endif
+
 
     // Letterbox scale to physical display (fixes internal RAM allocation limits)
     static uint16_t* s_frameBuf = nullptr;
