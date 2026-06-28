@@ -265,8 +265,48 @@ struct Turn {
   bool used;
 };
 
-static Turn history[MAX_HISTORY];
+static Turn *history = nullptr;
 static int historyCount = 0;
+
+typedef enum {
+    PLATFORM_DISCORD,
+    PLATFORM_TELEGRAM,
+    PLATFORM_SERIAL
+} platform_t;
+
+typedef struct {
+    platform_t platform;
+    char content[1024];
+} bus_msg_t;
+
+static QueueHandle_t message_bus_queue = NULL;
+
+const char *chatWithLLM(const char *userMessage);
+bool discordSendMessage(const char *text);
+bool tgSendMessage(const char *text);
+
+#include <esp_task_wdt.h>
+static void agentTask(void *pvParameters) {
+    esp_task_wdt_add(NULL);
+    bus_msg_t msg;
+    while (1) {
+        if (xQueueReceive(message_bus_queue, &msg, portMAX_DELAY) == pdTRUE) {
+            Serial.printf("\n--- Agent Task Received Message ---\n");
+            
+            const char *resp = chatWithLLM(msg.content);
+            if (!resp) resp = "[error: LLM returned empty]";
+            
+            if (msg.platform == PLATFORM_DISCORD) {
+                discordSendMessage(resp);
+            } else if (msg.platform == PLATFORM_TELEGRAM) {
+                tgSendMessage(resp);
+            } else if (msg.platform == PLATFORM_SERIAL) {
+                Serial.printf("\n[Agent] %s\n> ", resp);
+            }
+        }
+    }
+}
+
 
 /*============================================================================
  * History Persistence (LittleFS)
@@ -303,7 +343,8 @@ static void historySave() {
   if (!f)
     return;
 
-  static char escaped[LLM_MAX_RESPONSE_LEN + 512];
+  static char *escaped = nullptr;
+  if (!escaped) escaped = (char *)ps_malloc(LLM_MAX_RESPONSE_LEN + 512);
 
   f.print("[");
   for (int i = 0; i < historyCount; i++) {
@@ -325,11 +366,12 @@ static void historySave() {
 }
 
 static void historyLoad() {
-  static char buf[8192];
-  int len = readFile(HISTORY_FILE, buf, sizeof(buf));
+  if (!history) history = (Turn *)ps_malloc(MAX_HISTORY * sizeof(Turn));
+  static char *buf = nullptr;
+  if (!buf) buf = (char *)ps_malloc(8192);
+  int len = readFile(HISTORY_FILE, buf, 8192);
   if (len <= 0)
     return;
-
   historyCount = 0;
   const char *p = buf;
 
@@ -446,8 +488,7 @@ bool connectWiFi() {
 #define MAX_AGENT_ITERATIONS 5
 
 /* Static storage for tool call results (persists across loop iterations) */
-static char toolResultBufs[LLM_MAX_TOOL_CALLS][TOOL_RESULT_MAX_LEN];
-char toolCallJsonBuf[4096]; /* copy of tool_calls_json for message building */
+char *toolCallJsonBuf = nullptr;
 static char memoryBuf[512]; /* persistent AI memory from /memory.txt */
 
 /**
@@ -473,7 +514,18 @@ const char *chatWithLLM(const char *userMessage) {
    * Layout: system + history pairs + user + [assistant+tool results]*iterations
    * Static to avoid blowing the 8KB loop task stack.
    */
-  static LlmMessage messages[LLM_MAX_MESSAGES];
+  /* Static storage for tool call results (persists across loop iterations) */
+  static char **toolResultBufs = nullptr;
+  if (!toolResultBufs) {
+    toolResultBufs = (char **)ps_malloc(LLM_MAX_TOOL_CALLS * sizeof(char *));
+    for (int i = 0; i < LLM_MAX_TOOL_CALLS; i++) {
+      toolResultBufs[i] = (char *)ps_malloc(TOOL_RESULT_MAX_LEN);
+    }
+  }
+
+  static LlmMessage *messages = nullptr;
+  if (!messages) messages = (LlmMessage *)ps_malloc(LLM_MAX_MESSAGES * sizeof(LlmMessage));
+
   int msgCount = 0;
 
   /* System prompt */
@@ -501,14 +553,15 @@ const char *chatWithLLM(const char *userMessage) {
   unsigned long t0 = millis();
 
   const char *tools_json = toolsGetDefinitions();
-  static LlmResult result;
+  static LlmResult *result = nullptr;
+  if (!result) result = (LlmResult *)ps_malloc(sizeof(LlmResult));
   int totalPromptTokens = 0;
   int totalCompletionTokens = 0;
   const char *finalContent = nullptr;
   bool ok = false;
 
   for (int iter = 0; iter < MAX_AGENT_ITERATIONS; iter++) {
-    ok = llm.chat(messages, msgCount, tools_json, &result);
+    ok = llm.chat(messages, msgCount, tools_json, result);
 
     /* If request too large, drop oldest history pair and retry */
     while (!ok && strstr(llm.lastError(), "too large") &&
@@ -519,39 +572,39 @@ const char *chatWithLLM(const char *userMessage) {
               (msgCount - histStart - 2) * sizeof(LlmMessage));
       msgCount -= 2;
       histEnd -= 2;
-      ok = llm.chat(messages, msgCount, tools_json, &result);
+      ok = llm.chat(messages, msgCount, tools_json, result);
     }
     if (!ok)
       break;
 
-    totalPromptTokens += result.prompt_tokens;
-    totalCompletionTokens += result.completion_tokens;
+    totalPromptTokens += result->prompt_tokens;
+    totalCompletionTokens += result->completion_tokens;
 
     /* No tool calls - we're done */
-    if (result.tool_call_count == 0) {
-      finalContent = result.content;
+    if (result->tool_call_count == 0) {
+      finalContent = result->content;
       break;
     }
 
     /* Execute tool calls */
     Serial.printf("[Agent] %d tool call(s) in iteration %d:\n",
-                  result.tool_call_count, iter + 1);
+                  result->tool_call_count, iter + 1);
 
     /* Save tool_calls_json for message building */
-    strncpy(toolCallJsonBuf, result.tool_calls_json,
-            sizeof(toolCallJsonBuf) - 1);
-    toolCallJsonBuf[sizeof(toolCallJsonBuf) - 1] = '\0';
+    strncpy(toolCallJsonBuf, result->tool_calls_json,
+            4096 - 1);
+    toolCallJsonBuf[4096 - 1] = '\0';
 
     /* Add assistant message with tool calls */
     if (msgCount < LLM_MAX_MESSAGES) {
       messages[msgCount++] = llmToolCallMsg(
-          result.content[0] ? result.content : nullptr, toolCallJsonBuf);
+          result->content[0] ? result->content : nullptr, toolCallJsonBuf);
     }
 
     /* Execute each tool and add result messages */
-    for (int t = 0; t < result.tool_call_count && msgCount < LLM_MAX_MESSAGES;
+    for (int t = 0; t < result->tool_call_count && msgCount < LLM_MAX_MESSAGES;
          t++) {
-      LlmToolCall *tc = &result.tool_calls[t];
+      LlmToolCall *tc = &result->tool_calls[t];
 
       Serial.printf("  -> %s(%s)\n", tc->name, tc->arguments);
 
@@ -640,8 +693,6 @@ static void onNatsEvent(nats_client_t *client, nats_event_t event,
   }
 }
 
-static void tgYield(); /* forward declaration */
-static void discordYield();
 
 /**
  * NATS chat handler - request/reply. Caller sends a message,
@@ -662,8 +713,6 @@ static void onNatsChat(nats_client_t *client, const nats_msg_t *msg,
 
   Serial.printf("\n[NATS] chat: %s\n", chatBuf);
 
-  tgYield();
-  discordYield(); /* Free TLS so LLM can allocate */
   const char *response = chatWithLLM(chatBuf);
 
   /* Reply if caller expects a response */
@@ -688,11 +737,9 @@ extern bool g_telegram_enabled;
 
 /* Shared command response buffer (NATS + Telegram + Serial, single-threaded so
  * safe) */
-static char cmdResponseBuf[1024];
+static char *cmdResponseBuf = nullptr;
 
 /* Forward declarations */
-static void telegramYield();
-static void discordYield();
 
 /**
  * Execute a device command, writing compact result to buf.
@@ -950,9 +997,9 @@ static void onNatsToolExec(nats_client_t *client, const nats_msg_t *msg,
 
   /* Copy payload into toolCallJsonBuf (idle — only used by chatWithLLM,
    * which we never call from this callback). */
-  size_t len = msg->data_len < sizeof(toolCallJsonBuf) - 1
+  size_t len = msg->data_len < 4096 - 1
                    ? msg->data_len
-                   : sizeof(toolCallJsonBuf) - 1;
+                   : 4096 - 1;
   memcpy(toolCallJsonBuf, msg->data, len);
   toolCallJsonBuf[len] = '\0';
 
@@ -1001,7 +1048,7 @@ static void onNatsToolExec(nats_client_t *client, const nats_msg_t *msg,
   bool ok = found && strncmp(cmdResponseBuf, "Error:", 6) != 0;
 
   /* Build JSON reply — escape directly into reply buffer (no intermediate) */
-  static char reply[768];
+  static char *reply = nullptr; if(!reply) reply = (char*)ps_malloc(768);
   int w;
   if (ok) {
     w = snprintf(reply, sizeof(reply), "{\"ok\":true,\"result\":\"");
@@ -1039,13 +1086,13 @@ static void onNatsCapabilities(nats_client_t *client, const nats_msg_t *msg,
    * which we never call from this callback). */
   int w = 0;
 
-  w += snprintf(toolCallJsonBuf + w, sizeof(toolCallJsonBuf) - w,
+  w += snprintf(toolCallJsonBuf + w, 4096 - w,
                 "{\"device\":\"%s\",\"version\":\"%s\",\"free_heap\":%u,",
                 cfg_device_name, WIRECLAW_VERSION, ESP.getFreeHeap());
 
   /* Tools list */
   w += snprintf(
-      toolCallJsonBuf + w, sizeof(toolCallJsonBuf) - w,
+      toolCallJsonBuf + w, 4096 - w,
       "\"tools\":[\"led_set\",\"gpio_write\",\"gpio_read\",\"device_info\","
       "\"file_read\",\"file_write\",\"nats_publish\",\"temperature_read\","
       "\"device_register\",\"device_list\",\"device_remove\",\"sensor_read\","
@@ -1053,11 +1100,11 @@ static void onNatsCapabilities(nats_client_t *client, const nats_msg_t *msg,
       "\"rule_enable\",\"serial_send\",\"chain_create\"],");
 
   /* Devices */
-  w += snprintf(toolCallJsonBuf + w, sizeof(toolCallJsonBuf) - w,
+  w += snprintf(toolCallJsonBuf + w, 4096 - w,
                 "\"devices\":[");
   Device *devs = deviceGetAll();
   bool firstDev = true;
-  for (int i = 0; i < MAX_DEVICES && w < (int)sizeof(toolCallJsonBuf) - 200;
+  for (int i = 0; i < MAX_DEVICES && w < (int)4096 - 200;
        i++) {
     if (!devs[i].used)
       continue;
@@ -1068,23 +1115,23 @@ static void onNatsCapabilities(nats_client_t *client, const nats_msg_t *msg,
     if (deviceIsSensor(d->kind)) {
       float val = deviceReadSensor(d);
       w += snprintf(
-          toolCallJsonBuf + w, sizeof(toolCallJsonBuf) - w,
+          toolCallJsonBuf + w, 4096 - w,
           "{\"name\":\"%s\",\"kind\":\"%s\",\"value\":%.1f,\"unit\":\"%s\"}",
           d->name, deviceKindName(d->kind), val, d->unit);
     } else {
-      w += snprintf(toolCallJsonBuf + w, sizeof(toolCallJsonBuf) - w,
+      w += snprintf(toolCallJsonBuf + w, 4096 - w,
                     "{\"name\":\"%s\",\"kind\":\"%s\",\"pin\":%d}", d->name,
                     deviceKindName(d->kind), d->pin);
     }
   }
-  w += snprintf(toolCallJsonBuf + w, sizeof(toolCallJsonBuf) - w, "],");
+  w += snprintf(toolCallJsonBuf + w, 4096 - w, "],");
 
   /* Rules */
   w +=
-      snprintf(toolCallJsonBuf + w, sizeof(toolCallJsonBuf) - w, "\"rules\":[");
+      snprintf(toolCallJsonBuf + w, 4096 - w, "\"rules\":[");
   const Rule *rules = ruleGetAll();
   bool firstRule = true;
-  for (int i = 0; i < MAX_RULES && w < (int)sizeof(toolCallJsonBuf) - 200;
+  for (int i = 0; i < MAX_RULES && w < (int)4096 - 200;
        i++) {
     if (!rules[i].used)
       continue;
@@ -1093,14 +1140,14 @@ static void onNatsCapabilities(nats_client_t *client, const nats_msg_t *msg,
       toolCallJsonBuf[w++] = ',';
     firstRule = false;
     w += snprintf(
-        toolCallJsonBuf + w, sizeof(toolCallJsonBuf) - w,
+        toolCallJsonBuf + w, 4096 - w,
         "{\"id\":\"%s\",\"name\":\"%s\",\"enabled\":%s,\"condition\":\"%s\","
         "\"sensor\":\"%s\",\"fired\":%s}",
         r->id, r->name, r->enabled ? "true" : "false",
         conditionOpName(r->condition), r->sensor_name,
         r->fired ? "true" : "false");
   }
-  w += snprintf(toolCallJsonBuf + w, sizeof(toolCallJsonBuf) - w,
+  w += snprintf(toolCallJsonBuf + w, 4096 - w,
                 "],\"hal\":{\"gpio\":true,\"adc\":true,\"pwm\":true,"
                 "\"dac\":false,\"uart\":true,\"system_temp\":true}}");
 
@@ -1271,12 +1318,18 @@ bool g_telegram_enabled = false;
 
 #include <WiFiClientSecure.h>
 
+#include <WebSocketsClient.h>
+#include <ArduinoJson.h>
+
 bool g_discord_enabled = false;
 static WiFiClientSecure discordClient;
-static unsigned long discordLastPoll = 0;
 static const char *DISCORD_API_HOST = "discord.com";
 static const int DISCORD_API_PORT = 443;
-static char discordLastMessageId[32] = "";
+
+static WebSocketsClient discord_ws;
+static int discord_heartbeat_interval = 41250;
+static unsigned long discord_last_heartbeat = 0;
+static char discord_bot_id[32] = "";
 
 static int tgLastUpdateId = 0;
 static unsigned long tgLastPoll = 0;
@@ -1386,12 +1439,14 @@ static int tgApiCall(const char *method, const char *body, int body_len,
  * Send a message to the allowed chat.
  */
 bool tgSendMessage(const char *text) {
-  static char req[LLM_MAX_RESPONSE_LEN + 256];
-  static char escaped[LLM_MAX_RESPONSE_LEN + 128];
+  static char *req = nullptr;
+  if (!req) req = (char *)ps_malloc(LLM_MAX_RESPONSE_LEN + 256);
+  static char *escaped = nullptr;
+  if (!escaped) escaped = (char *)ps_malloc(LLM_MAX_RESPONSE_LEN + 128);
 
   /* Escape the text for JSON */
   int w = 0;
-  for (int i = 0; text[i] && w < (int)sizeof(escaped) - 2; i++) {
+  for (int i = 0; text[i] && w < (int)(LLM_MAX_RESPONSE_LEN + 128) - 2; i++) {
     char c = text[i];
     if (c == '"' || c == '\\') {
       escaped[w++] = '\\';
@@ -1676,14 +1731,7 @@ static void telegramTick() {
   }
 }
 
-/** Release Telegram TLS connection if active, so LLM can use the heap. */
-static void tgYield() {
-  if (tgState != TG_IDLE) {
-    tgClient.stop();
-    tgState = TG_IDLE;
-    tgLastPoll = millis();
-  }
-}
+
 
 /*============================================================================
  * Discord Bot Client
@@ -1762,10 +1810,12 @@ static int discordApiCall(const char *method, const char *endpoint,
 bool discordSendMessage(const char *text) {
   if (!g_discord_enabled)
     return false;
-  static char req[LLM_MAX_RESPONSE_LEN + 256];
-  static char escaped[LLM_MAX_RESPONSE_LEN + 128];
+  static char *req = nullptr;
+  if (!req) req = (char *)ps_malloc(LLM_MAX_RESPONSE_LEN + 256);
+  static char *escaped = nullptr;
+  if (!escaped) escaped = (char *)ps_malloc(LLM_MAX_RESPONSE_LEN + 128);
   int w = 0;
-  for (int i = 0; text[i] && w < (int)sizeof(escaped) - 2; i++) {
+  for (int i = 0; text[i] && w < (int)(LLM_MAX_RESPONSE_LEN + 128) - 2; i++) {
     char c = text[i];
     if (c == '"' || c == '\\') {
       escaped[w++] = '\\';
@@ -1787,128 +1837,100 @@ bool discordSendMessage(const char *text) {
   return discordApiCall("POST", endpoint, req, req_len, resp, sizeof(resp)) > 0;
 }
 
-static void discordTick() {
-  unsigned long now = millis();
-  if (now - discordLastPoll < 5000)
-    return; // Poll every 5s to avoid rate limits
-  discordLastPoll = now;
 
-  static char endpoint[128];
-  snprintf(endpoint, sizeof(endpoint), "/channels/%s/messages?limit=1",
-           cfg_discord_channel_id);
-  static char resp[2048];
-  int rlen = discordApiCall("GET", endpoint, "", 0, resp, sizeof(resp));
-  if (rlen <= 0)
-    return;
-
-  // Parse response. Should be an array of messages: [{"id": "...", "content":
-  // "...", "author": {"id": "..."}}]
-  const char *id_key = strstr(resp, "\"id\"");
-  if (!id_key)
-    return;
-  const char *p = id_key + 4;
-  while (*p == ':' || *p == ' ' || *p == '"')
-    p++;
-  char msg_id[32];
-  int mw = 0;
-  while (*p && *p != '"' && mw < sizeof(msg_id) - 1)
-    msg_id[mw++] = *p++;
-  msg_id[mw] = '\0';
-
-  // If it's the same as the last seen message, ignore
-  if (discordLastMessageId[0] != '\0' &&
-      strcmp(msg_id, discordLastMessageId) == 0)
-    return;
-
-  // Check author
-  const char *auth_str = strstr(resp, "\"author\"");
-  if (auth_str) {
-    const char *auth_id_str = strstr(auth_str, "\"id\"");
-    if (auth_id_str) {
-      p = auth_id_str + 4;
-      while (*p == ':' || *p == ' ' || *p == '"')
-        p++;
-      char auth_id[32];
-      int aw = 0;
-      while (*p && *p != '"' && aw < sizeof(auth_id) - 1)
-        auth_id[aw++] = *p++;
-      auth_id[aw] = '\0';
-
-      // Ignore messages from the bot itself (if DISCORD_USER_ID is set)
-      if (cfg_discord_user_id[0] != '\0' &&
-          strcmp(auth_id, cfg_discord_user_id) == 0) {
-        strncpy(discordLastMessageId, msg_id, sizeof(discordLastMessageId));
-        return;
-      }
+static void discordWebSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
+    switch(type) {
+        case WStype_DISCONNECTED:
+            Serial.printf("[Discord] Disconnected from Gateway!\n");
+            break;
+        case WStype_CONNECTED:
+            Serial.printf("[Discord] Connected to Gateway!\n");
+            break;
+        case WStype_TEXT: {
+            JsonDocument doc;
+            DeserializationError error = deserializeJson(doc, payload, length);
+            if (error) {
+                Serial.printf("[Discord] JSON Parse failed: %s\n", error.c_str());
+                break;
+            }
+            
+            int op = doc["op"];
+            if (op == 10) { // Hello
+                discord_heartbeat_interval = doc["d"]["heartbeat_interval"] | 41250;
+                Serial.printf("[Discord] Gateway Hello! Heartbeat: %dms\n", discord_heartbeat_interval);
+                
+                // Send Identify
+                JsonDocument idoc;
+                idoc["op"] = 2;
+                idoc["d"]["token"] = cfg_discord_token;
+                idoc["d"]["intents"] = 33280; // GUILD_MESSAGES (32768) + MESSAGE_CONTENT (512)
+                idoc["d"]["properties"]["os"] = "FreeRTOS";
+                idoc["d"]["properties"]["browser"] = "WireClaw";
+                idoc["d"]["properties"]["device"] = "ESP32-S3";
+                
+                String identifyStr;
+                serializeJson(idoc, identifyStr);
+                discord_ws.sendTXT(identifyStr);
+            } else if (op == 0) { // Dispatch
+                const char* t = doc["t"];
+                if (t && strcmp(t, "READY") == 0) {
+                    const char* bot_id = doc["d"]["user"]["id"];
+                    if (bot_id) strncpy(discord_bot_id, bot_id, sizeof(discord_bot_id)-1);
+                    Serial.printf("[Discord] READY! Logged in as ID: %s\n", discord_bot_id);
+                } else if (t && strcmp(t, "MESSAGE_CREATE") == 0) {
+                    const char* content = doc["d"]["content"];
+                    const char* author_id = doc["d"]["author"]["id"];
+                    const char* channel_id = doc["d"]["channel_id"];
+                    bool is_bot = doc["d"]["author"]["bot"] | false;
+                    
+                    if (is_bot || !content || !author_id || !channel_id) break;
+                    
+                    // Only process messages in the configured channel
+                    if (strcmp(channel_id, cfg_discord_channel_id) != 0) break;
+                    
+                    bool is_owner = (cfg_discord_user_id[0] != '\0' && strcmp(author_id, cfg_discord_user_id) == 0);
+                    
+                    char mention_str[64];
+                    snprintf(mention_str, sizeof(mention_str), "<@%s>", discord_bot_id);
+                    
+                    if (is_owner || strstr(content, mention_str) != NULL || strcasestr(content, "wirebot") != NULL || strcasestr(content, "wireclaw") != NULL) {
+                        Serial.printf("\n[Discord] Message: %s\n", content);
+                        
+                        if (content[0] == '/') {
+                            if (handleCommand(content + 1, cmdResponseBuf, sizeof(cmdResponseBuf))) {
+                                discordSendMessage(cmdResponseBuf);
+                            } else {
+                                snprintf(cmdResponseBuf, sizeof(cmdResponseBuf), "Unknown command: %s", content);
+                                discordSendMessage(cmdResponseBuf);
+                            }
+                            Serial.printf("> ");
+                            break;
+                        }
+                        
+                        bus_msg_t bmsg;
+                        bmsg.platform = PLATFORM_DISCORD;
+                        strncpy(bmsg.content, content, sizeof(bmsg.content) - 1);
+                        bmsg.content[sizeof(bmsg.content) - 1] = '\0';
+                        xQueueSend(message_bus_queue, &bmsg, 0);
+                    }
+                }
+            }
+            break;
+        }
     }
-  }
-
-  // Is this the first poll? If so, just record the latest ID and do not respond
-  // to old messages
-  if (discordLastMessageId[0] == '\0') {
-    strncpy(discordLastMessageId, msg_id, sizeof(discordLastMessageId));
-    return;
-  }
-
-  strncpy(discordLastMessageId, msg_id, sizeof(discordLastMessageId));
-
-  // Extract content
-  const char *content_key = strstr(resp, "\"content\"");
-  if (!content_key)
-    return;
-  p = content_key + 9;
-  while (*p == ':' || *p == ' ')
-    p++;
-  if (*p != '"')
-    return;
-  p++;
-
-  static char msgBuf[512];
-  mw = 0;
-  while (*p && *p != '"' && mw < (int)sizeof(msgBuf) - 1) {
-    if (*p == '\\' && *(p + 1)) {
-      p++;
-      if (*p == 'n')
-        msgBuf[mw++] = '\n';
-      else
-        msgBuf[mw++] = *p;
-    } else {
-      msgBuf[mw++] = *p;
-    }
-    p++;
-  }
-  msgBuf[mw] = '\0';
-  if (mw == 0)
-    return;
-
-  Serial.printf("\n[Discord] Message: %s\n", msgBuf);
-
-  if (msgBuf[0] == '/') {
-    if (handleCommand(msgBuf + 1, cmdResponseBuf, sizeof(cmdResponseBuf))) {
-      discordSendMessage(cmdResponseBuf);
-    } else {
-      snprintf(cmdResponseBuf, sizeof(cmdResponseBuf), "Unknown command: %s",
-               msgBuf);
-      discordSendMessage(cmdResponseBuf);
-    }
-    Serial.printf("> ");
-    return;
-  }
-
-  const char *response = chatWithLLM(msgBuf);
-  if (response) {
-    discordSendMessage(response);
-  } else {
-    discordSendMessage("[error: LLM call failed]");
-  }
-  Serial.printf("> ");
 }
 
-static void discordYield() { discordClient.stop(); }
-
-/*============================================================================
- * Serial Commands
- *============================================================================*/
+static void discordTick() {
+    if (!g_discord_enabled) return;
+    
+    discord_ws.loop();
+    
+    unsigned long now = millis();
+    if (discord_heartbeat_interval > 0 && now - discord_last_heartbeat > (unsigned long)discord_heartbeat_interval) {
+        discord_last_heartbeat = now;
+        discord_ws.sendTXT("{\"op\":1,\"d\":null}");
+    }
+}
 
 void handleSerialCommand(const char *input) {
   /* Serial-only commands (not available via Telegram/NATS) */
@@ -1964,9 +1986,11 @@ void handleSerialCommand(const char *input) {
   }
 
   /* Unknown command - treat as chat */
-  tgYield();
-  discordYield(); /* Free TLS so LLM can allocate */
-  chatWithLLM(input);
+  bus_msg_t bmsg;
+  bmsg.platform = PLATFORM_SERIAL;
+  strncpy(bmsg.content, input, sizeof(bmsg.content) - 1);
+  bmsg.content[sizeof(bmsg.content) - 1] = '\0';
+  xQueueSend(message_bus_queue, &bmsg, 0);
   Serial.printf("> ");
 }
 
@@ -2066,7 +2090,11 @@ void setup() {
     g_discord_enabled = true;
     discordClient.setInsecure();
     discordClient.setTimeout(30);
-    discordLastPoll = millis() - 5000; // Trigger immediately
+
+    // Init WebSocket Gateway
+    discord_ws.beginSSL("gateway.discord.gg", 443, "/?v=10&encoding=json");
+    discord_ws.onEvent(discordWebSocketEvent);
+    discord_ws.setReconnectInterval(5000);
     Serial.printf("Discord: enabled (channel_id %s)\n", cfg_discord_channel_id);
   } else {
     Serial.printf("Discord: disabled (no token/channel in config)\n");
@@ -2075,7 +2103,12 @@ void setup() {
   /* Web config portal (HTTP on port 80 + mDNS) */
   webConfigSetup();
 
-  Serial.printf("\nReady! Free heap: %u bytes\n", ESP.getFreeHeap());
+  if (!toolCallJsonBuf) toolCallJsonBuf = (char *)ps_malloc(4096);
+  if (!cmdResponseBuf) cmdResponseBuf = (char *)ps_malloc(1024);
+  message_bus_queue = xQueueCreate(10, sizeof(bus_msg_t));
+  xTaskCreate(agentTask, "agentTask", 8192, NULL, 1, NULL);
+
+  Serial.printf("\nReady! Free heap: %u bytes\n", (unsigned int)ESP.getFreeHeap());
   Serial.printf("Type a message and press Enter. /help for commands.\n\n");
   Serial.printf("> ");
 }
@@ -2202,9 +2235,11 @@ void loop() {
       if (input[0] == '/') {
         handleSerialCommand(input);
       } else {
-        tgYield();
-        discordYield(); /* Free TLS so LLM can allocate */
-        chatWithLLM(input);
+        bus_msg_t bmsg;
+        bmsg.platform = PLATFORM_SERIAL;
+        strncpy(bmsg.content, input, sizeof(bmsg.content) - 1);
+        bmsg.content[sizeof(bmsg.content) - 1] = '\0';
+        xQueueSend(message_bus_queue, &bmsg, 0);
         Serial.printf("> ");
       }
       continue;

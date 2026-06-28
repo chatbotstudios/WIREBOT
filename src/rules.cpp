@@ -632,7 +632,7 @@ static bool ruleJsonGetBool(const char *json, const char *key, bool default_val)
 }
 
 void rulesSave() {
-    static char buf[4096];
+    static char *buf = nullptr; if(!buf) buf = (char*)ps_malloc(4096);
     int w = 0;
 
     w += snprintf(buf + w, sizeof(buf) - w, "[");
@@ -682,7 +682,7 @@ void rulesSave() {
 }
 
 static void rulesLoad() {
-    static char buf[4096];
+    static char *buf = nullptr; if(!buf) buf = (char*)ps_malloc(4096);
     File f = LittleFS.open("/rules.json", "r");
     if (!f) return;
 

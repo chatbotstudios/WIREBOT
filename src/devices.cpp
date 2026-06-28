@@ -436,7 +436,7 @@ static bool devJsonGetBool(const char *json, const char *key, bool default_val) 
 }
 
 void devicesSave() {
-    static char buf[2048];
+    static char *buf = nullptr; if(!buf) buf = (char*)ps_malloc(2048);
     int w = 0;
 
     w += snprintf(buf + w, sizeof(buf) - w, "[");
@@ -478,7 +478,7 @@ void devicesSave() {
 }
 
 static void devicesLoad() {
-    static char buf[2048];
+    static char *buf = nullptr; if(!buf) buf = (char*)ps_malloc(2048);
     File f = LittleFS.open("/devices.json", "r");
     if (!f) return;
 

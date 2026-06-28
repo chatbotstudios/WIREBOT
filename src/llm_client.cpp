@@ -364,7 +364,7 @@ int LlmClient::buildGeminiRequest(char *buf, int buf_len,
     
     // Tools
     if (tools_json && tools_json[0]) {
-        static char gemini_tools[4096];
+        static char *gemini_tools = nullptr; if(!gemini_tools) gemini_tools = (char*)ps_malloc(4096);
         convert_openai_tools_to_gemini(tools_json, gemini_tools, sizeof(gemini_tools));
         if (gemini_tools[0]) {
             w += snprintf(buf + w, buf_len - w, ",\"tools\":[{\"functionDeclarations\":%s}]", gemini_tools);
@@ -749,15 +749,20 @@ bool LlmClient::chat(const LlmMessage *messages, int count,
     result->http_status = 0;
     result->tool_call_count = 0;
 
-    static char request_buf[LLM_MAX_REQUEST_LEN];
+    char *request_buf = (char *)ps_malloc(LLM_MAX_REQUEST_LEN);
+    if (!request_buf) {
+        snprintf(m_error, sizeof(m_error), "OOM: failed to allocate request buffer");
+        return false;
+    }
     int req_len;
     if (m_provider == LLM_PROVIDER_GEMINI) {
-        req_len = buildGeminiRequest(request_buf, sizeof(request_buf), messages, count, tools_json);
+        req_len = buildGeminiRequest(request_buf, LLM_MAX_REQUEST_LEN, messages, count, tools_json);
     } else {
-        req_len = buildRequest(request_buf, sizeof(request_buf), messages, count, tools_json);
+        req_len = buildRequest(request_buf, LLM_MAX_REQUEST_LEN, messages, count, tools_json);
     }
     if (req_len < 0) {
         snprintf(m_error, sizeof(m_error), "Request too large for buffer");
+        free(request_buf);
         return false;
     }
 
@@ -767,6 +772,7 @@ bool LlmClient::chat(const LlmMessage *messages, int count,
     if (!m_client->connect(m_host, m_port)) {
         snprintf(m_error, sizeof(m_error), "%s connect failed",
                  m_use_tls ? "TLS" : "TCP");
+        free(request_buf);
         return false;
     }
 
@@ -787,6 +793,7 @@ bool LlmClient::chat(const LlmMessage *messages, int count,
     m_client->printf("Connection: close\r\n");
     m_client->printf("\r\n");
     m_client->write((uint8_t *)request_buf, req_len);
+    free(request_buf);
 
     if (g_debug) Serial.printf("[LLM] Request sent. Waiting for response...\n");
 
@@ -802,26 +809,34 @@ bool LlmClient::chat(const LlmMessage *messages, int count,
         delay(50);
     }
 
-    static char response_buf[LLM_MAX_RESPONSE_LEN + 2048];
-    int body_len = readResponse(response_buf, sizeof(response_buf));
+    char *response_buf = (char *)ps_malloc(LLM_MAX_RESPONSE_LEN);
+    if (!response_buf) {
+        snprintf(m_error, sizeof(m_error), "OOM: failed to allocate response buffer");
+        m_client->stop();
+        return false;
+    }
+    int resp_len = readResponse(response_buf, LLM_MAX_RESPONSE_LEN);
 
     m_client->stop();
 
-    if (body_len <= 0) {
-        snprintf(m_error, sizeof(m_error), "Empty response body");
-        return false;
+    if (resp_len >= (int)LLM_MAX_RESPONSE_LEN - 1) {
+        snprintf(m_error, sizeof(m_error), "Response truncated");
     }
 
     if (g_debug) {
         Serial.printf("[LLM] Response: %d bytes (%lums total)\n",
-                      body_len, millis() - t0);
-        Serial.printf("[LLM] Body: %.*s\n", body_len < 500 ? body_len : 500,
+                      resp_len, millis() - t0);
+        Serial.printf("[LLM] Body: %.*s\n", resp_len < 500 ? resp_len : 500,
                       response_buf);
     }
 
+    bool parse_ok = false;
     if (m_provider == LLM_PROVIDER_GEMINI) {
-        return parseGeminiResponse(response_buf, body_len, result);
+        parse_ok = parseGeminiResponse(response_buf, resp_len, result);
     } else {
-        return parseResponse(response_buf, body_len, result);
+        parse_ok = parseResponse(response_buf, resp_len, result);
     }
+    
+    free(response_buf);
+    return parse_ok;
 }

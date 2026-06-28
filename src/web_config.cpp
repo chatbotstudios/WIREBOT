@@ -345,7 +345,7 @@ static int wcFormatAction(char *buf, int len, ActionType act, const char *actuat
 }
 
 static void handleGetRules() {
-    static char buf[4096];
+    static char *buf = nullptr; if(!buf) buf = (char*)ps_malloc(4096);
     int w = 0;
 
     const Rule *rules = ruleGetAll();
@@ -443,7 +443,7 @@ static bool isInternalDevice(DeviceKind kind) {
 }
 
 static void handleGetDevices() {
-    static char buf[2048];
+    static char *buf = nullptr; if(!buf) buf = (char*)ps_malloc(2048);
     int w = 0;
 
     Device *devs = deviceGetAll();
