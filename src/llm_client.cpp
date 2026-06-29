@@ -381,20 +381,34 @@ int LlmClient::buildGeminiRequest(char *buf, int buf_len,
     w += snprintf(buf + w, buf_len - w, "]");
     
     // Add system instruction if exists
-    if (system_msg && system_msg->content && system_msg->content[0]) {
+    bool has_system = false;
+    for (int i = 0; i < count; i++) {
+        if (strcmp(messages[i].role, "system") == 0 && messages[i].content && messages[i].content[0]) {
+            has_system = true;
+            break;
+        }
+    }
+    
+    if (has_system) {
         w += snprintf(buf + w, buf_len - w, ",\"systemInstruction\":{\"parts\":[{\"text\":\"");
         if (w >= buf_len) return -1;
-        int esc = json_escape(buf + w, buf_len - w, system_msg->content);
-        if (esc < 0) return -1;
-        w += esc;
+        for (int i = 0; i < count; i++) {
+            if (strcmp(messages[i].role, "system") == 0 && messages[i].content && messages[i].content[0]) {
+                int esc = json_escape(buf + w, buf_len - w, messages[i].content);
+                if (esc < 0) return -1;
+                w += esc;
+                w += snprintf(buf + w, buf_len - w, "\\n\\n");
+                if (w >= buf_len) return -1;
+            }
+        }
         w += snprintf(buf + w, buf_len - w, "\"}]}");
         if (w >= buf_len) return -1;
     }
     
     // Tools
     if (tools_json && tools_json[0]) {
-        static char *gemini_tools = nullptr; if(!gemini_tools) gemini_tools = (char*)ps_malloc(4096);
-        convert_openai_tools_to_gemini(tools_json, gemini_tools, 4096);
+        static char *gemini_tools = nullptr; if(!gemini_tools) gemini_tools = (char*)ps_malloc(16384);
+        convert_openai_tools_to_gemini(tools_json, gemini_tools, 16384);
         if (gemini_tools[0]) {
             w += snprintf(buf + w, buf_len - w, ",\"tools\":[{\"functionDeclarations\":%s}]", gemini_tools);
             if (w >= buf_len) return -1;
@@ -727,7 +741,9 @@ int LlmClient::readResponse(char *buf, int buf_len) {
         return -1;
     }
     int http_status = status_line.substring(9, 12).toInt();
-    if (g_debug) Serial.printf("[LLM] HTTP %d\n", http_status);
+    if (http_status != 200 || g_debug) {
+        Serial.printf("[LLM] HTTP %d\n", http_status);
+    }
 
     while (m_client->connected()) {
         String header = m_client->readStringUntil('\n');
@@ -854,20 +870,20 @@ bool LlmClient::chat(const LlmMessage *messages, int count,
         snprintf(m_error, sizeof(m_error), "Response truncated");
     }
 
-    if (g_debug) {
-        Serial.printf("[LLM] Response: %d bytes (%lums total)\n",
-                      resp_len, millis() - t0);
-        Serial.printf("[LLM] Body: %.*s\n", resp_len < 500 ? resp_len : 500,
-                      response_buf);
-    }
-
     bool parse_ok = false;
     if (m_provider == LLM_PROVIDER_GEMINI) {
         parse_ok = parseGeminiResponse(response_buf, resp_len, result);
     } else {
         parse_ok = parseResponse(response_buf, resp_len, result);
     }
-    
+
+    if (g_debug || (!parse_ok && resp_len > 0)) {
+        Serial.printf("[LLM] Response: %d bytes (%lums total)\n",
+                      resp_len, millis() - t0);
+        Serial.printf("[LLM] Body: %.*s\n", resp_len < 500 ? resp_len : 500,
+                      response_buf);
+    }
+
     free(response_buf);
     return parse_ok;
 }
