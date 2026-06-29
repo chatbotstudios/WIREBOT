@@ -323,37 +323,10 @@ int LlmClient::buildGeminiRequest(char *buf, int buf_len,
         if (w >= buf_len) return -1;
 
         if (msg->type == LLM_MSG_TOOL_CALL) {
-            if (msg->tool_calls_json && msg->tool_calls_json[0]) {
-                JsonDocument doc;
-                DeserializationError err = deserializeJson(doc, msg->tool_calls_json);
-                if (!err && doc.is<JsonArray>()) {
-                    JsonArray arr = doc.as<JsonArray>();
-                    bool first_tc = true;
-                    for (JsonObject tc : arr) {
-                        if (!first_tc) { 
-                            w += snprintf(buf + w, buf_len - w, ","); 
-                            if (w >= buf_len) return -1;
-                        }
-                        first_tc = false;
-                        const char* name = tc["function"]["name"];
-                        const char* args_str = tc["function"]["arguments"];
-                        
-                        w += snprintf(buf + w, buf_len - w, "{\"functionCall\":{\"name\":\"%s\",\"args\":", name ? name : "");
-                        if (w >= buf_len) return -1;
-                        
-                        if (args_str && args_str[0] == '{') {
-                            w += snprintf(buf + w, buf_len - w, "%s", args_str);
-                        } else {
-                            w += snprintf(buf + w, buf_len - w, "{}");
-                        }
-                        if (w >= buf_len) return -1;
-                        
-                        w += snprintf(buf + w, buf_len - w, "}}");
-                        if (w >= buf_len) return -1;
-                    }
-                } else {
-                    w += snprintf(buf + w, buf_len - w, "{\"text\":\"\"}");
-                }
+            if (msg->tool_calls_json && msg->tool_calls_json[0] == '[') {
+                int len = strlen(msg->tool_calls_json);
+                w += snprintf(buf + w, buf_len - w, "%.*s", len - 2, msg->tool_calls_json + 1);
+                if (w >= buf_len) return -1;
             } else {
                 w += snprintf(buf + w, buf_len - w, "{\"text\":\"\"}");
             }
@@ -441,6 +414,24 @@ bool LlmClient::parseGeminiResponse(const char *body, int body_len, LlmResult *r
         result->content_len = json_unescape(result->content, copy_len);
     }
 
+    // Capture the entire parts array for echoing back
+    const char *parts_key = "\"parts\":";
+    const char *parts_found = (const char *)memmem(body, body_len, parts_key, strlen(parts_key));
+    if (parts_found) {
+        const char *parts_arr = parts_found + strlen(parts_key);
+        while (*parts_arr == ' ' || *parts_arr == '\n' || *parts_arr == '\r') parts_arr++;
+        if (*parts_arr == '[') {
+            const char *parts_end = json_skip_value(parts_arr, body + body_len);
+            if (parts_end) {
+                int plen = parts_end - parts_arr;
+                int maxlen = sizeof(result->tool_calls_json) - 1;
+                int cpy = plen < maxlen ? plen : maxlen;
+                memcpy(result->tool_calls_json, parts_arr, cpy);
+                result->tool_calls_json[cpy] = '\0';
+            }
+        }
+    }
+
     // Check for functionCall
     const char *fc_key = "\"functionCall\":";
     const char *fc_found = (const char *)memmem(body, body_len, fc_key, strlen(fc_key));
@@ -457,12 +448,21 @@ bool LlmClient::parseGeminiResponse(const char *body, int body_len, LlmResult *r
                 const char *name = json_find_string(fc_obj, obj_len, "name", &nlen);
                 if (name && nlen > 0) {
                     LlmToolCall *tc = &result->tool_calls[0];
+                    
+                    // Keep the original name for tc->id (used in functionResponse)
+                    int id_len = nlen < (int)sizeof(tc->id) - 1 ? nlen : (int)sizeof(tc->id) - 1;
+                    memcpy(tc->id, name, id_len);
+                    tc->id[id_len] = '\0';
+                    
+                    // Strip default_api: prefix if Gemini added it for tc->name (used for execution)
+                    if (nlen > 12 && strncmp(name, "default_api:", 12) == 0) {
+                        name += 12;
+                        nlen -= 12;
+                    }
+                    
                     int clen = nlen < (int)sizeof(tc->name) - 1 ? nlen : (int)sizeof(tc->name) - 1;
                     memcpy(tc->name, name, clen);
                     tc->name[clen] = '\0';
-                    
-                    // Use the name as id for Gemini
-                    strncpy(tc->id, tc->name, sizeof(tc->id));
                     
                     // Extract args
                     const char *args_key = "\"args\":";
@@ -485,10 +485,6 @@ bool LlmClient::parseGeminiResponse(const char *body, int body_len, LlmResult *r
                     }
                     
                     result->tool_call_count = 1;
-                    char esc_args[512] = {0};
-                    json_escape(esc_args, sizeof(esc_args), tc->arguments);
-                    // Mock tool_calls_json to keep LlmClient::chat happy
-                    snprintf(result->tool_calls_json, sizeof(result->tool_calls_json), "[{\"id\":\"%s\",\"function\":{\"name\":\"%s\",\"arguments\":\"%s\"}}]", tc->id, tc->name, esc_args);
                 }
             }
         }
