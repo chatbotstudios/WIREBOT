@@ -364,7 +364,7 @@ int LlmClient::buildGeminiRequest(char *buf, int buf_len,
             int esc = json_escape(buf + w, buf_len - w, msg->content ? msg->content : "");
             if (esc < 0) return -1;
             w += esc;
-            w += snprintf(buf + w, buf_len - w, "\"}}");
+            w += snprintf(buf + w, buf_len - w, "\"}}}");
         } else {
             // Normal text
             w += snprintf(buf + w, buf_len - w, "{\"text\":\"");
