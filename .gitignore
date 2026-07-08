@@ -1,7 +1,7 @@
 .pio
-data/config.json
-data/config.json.openrouter
-data/config.json.ollama
+data/vault/config.json
+data/vault/config.json.openrouter
+data/vault/config.json.ollama
 tmp/
 
 .env
