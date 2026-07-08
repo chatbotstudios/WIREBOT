@@ -647,16 +647,17 @@ const char *chatWithLLM(const char *userMessage) {
                   cli_cmd[len] = '\0';
               }
           }
-          if (!handleCommand(cli_cmd, toolResultBufs[t], TOOL_RESULT_MAX_LEN)) {
-              snprintf(toolResultBufs[t], TOOL_RESULT_MAX_LEN, "Unknown CLI command: %s", cli_cmd);
+          const char *cmd_to_run = cli_cmd;
+          if (cmd_to_run[0] == '/') cmd_to_run++;
+          
+          if (!handleCommand(cmd_to_run, toolResultBufs[t], TOOL_RESULT_MAX_LEN)) {
+              snprintf(toolResultBufs[t], TOOL_RESULT_MAX_LEN, "Unknown CLI command: %s", cmd_to_run);
           }
-      } else if (strcmp(tc->name, "file_read") == 0) {
-          // Handled directly via toolExecute
-          toolExecute(tc->name, tc->arguments, toolResultBufs[t], TOOL_RESULT_MAX_LEN);
-      } else if (strcmp(tc->name, "file_write") == 0) {
-          toolExecute(tc->name, tc->arguments, toolResultBufs[t], TOOL_RESULT_MAX_LEN);
       } else {
-          snprintf(toolResultBufs[t], TOOL_RESULT_MAX_LEN, "Unknown tool: %s", tc->name);
+          // Handled directly via toolExecute
+          if (!toolExecute(tc->name, tc->arguments, toolResultBufs[t], TOOL_RESULT_MAX_LEN)) {
+              snprintf(toolResultBufs[t], TOOL_RESULT_MAX_LEN, "Unknown tool: %s", tc->name);
+          }
       }
 
 
@@ -2048,31 +2049,25 @@ static void discordWebSocketEvent(WStype_t type, uint8_t * payload, size_t lengt
                     // Only process messages in the configured channel
                     if (strcmp(channel_id, cfg_discord_channel_id) != 0) break;
                     
-                    bool is_owner = (cfg_discord_user_id[0] != '\0' && strcmp(author_id, cfg_discord_user_id) == 0);
+                    // Respond to ALL messages in the configured channel (like Telegram).
+                    Serial.printf("\n[Discord] Message: %s\n", content);
                     
-                    char mention_str[64];
-                    snprintf(mention_str, sizeof(mention_str), "<@%s>", discord_bot_id);
-                    
-                    if (is_owner || strstr(content, mention_str) != NULL || strcasestr(content, "wirebot") != NULL || strcasestr(content, "wireclaw") != NULL) {
-                        Serial.printf("\n[Discord] Message: %s\n", content);
-                        
-                        if (content[0] == '/') {
-                            if (handleCommand(content + 1, cmdResponseBuf, 1024)) {
-                                discordSendMessage(cmdResponseBuf);
-                            } else {
-                                snprintf(cmdResponseBuf, 1024, "Unknown command: %s", content);
-                                discordSendMessage(cmdResponseBuf);
-                            }
-                            Serial.printf("> ");
-                            break;
+                    if (content[0] == '/') {
+                        if (handleCommand(content + 1, cmdResponseBuf, 1024)) {
+                            discordSendMessage(cmdResponseBuf);
+                        } else {
+                            snprintf(cmdResponseBuf, 1024, "Unknown command: %s", content);
+                            discordSendMessage(cmdResponseBuf);
                         }
-                        
-                        bus_msg_t bmsg;
-                        bmsg.platform = PLATFORM_DISCORD;
-                        strncpy(bmsg.content, content, sizeof(bmsg.content) - 1);
-                        bmsg.content[sizeof(bmsg.content) - 1] = '\0';
-                        xQueueSend(message_bus_queue, &bmsg, 0);
+                        Serial.printf("> ");
+                        break;
                     }
+                    
+                    bus_msg_t bmsg;
+                    bmsg.platform = PLATFORM_DISCORD;
+                    strncpy(bmsg.content, content, sizeof(bmsg.content) - 1);
+                    bmsg.content[sizeof(bmsg.content) - 1] = '\0';
+                    xQueueSend(message_bus_queue, &bmsg, 0);
                 }
             }
             break;

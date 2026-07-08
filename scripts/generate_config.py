@@ -4,7 +4,7 @@ import re
 
 ENV_FILE = ".env"
 ENV_EXAMPLE = ".env.example"
-OUTPUT_FILE = "data/config.json"
+OUTPUT_FILE = "data/vault/config.json"
 
 def load_env(filepath):
     env_vars = {}
